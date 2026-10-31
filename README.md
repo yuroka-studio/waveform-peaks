@@ -1,4 +1,15 @@
-# waveform-peaks
+<h1 align="center">waveform-peaks</h1>
+
+<p align="center">
+  <a href="https://github.com/yuroka-studio/waveform-peaks/actions/workflows/test.yml"><img src="https://github.com/yuroka-studio/waveform-peaks/actions/workflows/test.yml/badge.svg" alt="test"></a>
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="license: MIT">
+  <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="dependencies: 0">
+  <img src="https://img.shields.io/badge/node-%3E%3D18.3-informational" alt="node: >=18.3">
+</p>
+
+<p align="center">
+  <a href="https://yuroka-studio.github.io/waveform-peaks/"><b>Try it in your browser</b></a> · <a href="#quick-start">Quick start</a> · <a href="#command-line">Command line</a> · <a href="#library">Library</a> · <a href="#türkçe">Türkçe</a>
+</p>
 
 Turn a song into compact waveform data for web players: **N normalised bars, peak and RMS**, as a tiny JSON file.
 
@@ -183,6 +194,15 @@ The test files in `test/fixtures` are **synthetic**: tones, square waves, silenc
 - No AIFF, Ogg or MP3 decoder of its own (use ffmpeg/afconvert, or the browser page).
 - No A-law/μ-law/ADPCM or RF64 WAV in the built-in decoder (they go to an installed ffmpeg if there is one).
 - No true-peak (inter-sample) or loudness (LUFS) measurement: `peakDb` is the sample peak.
+
+## More from Yuroka Studio
+
+Small, offline tools with no paid services, all MIT:
+
+- [nightshift-agents](https://github.com/yuroka-studio/nightshift-agents): scheduled coding agents that take one task from a backlog and open a pull request with real test evidence.
+- [shigley-calc](https://github.com/yuroka-studio/shigley-calc): tested machine-element calculators (endurance limit, fatigue, shafts, bolt groups) with an offline web page.
+- [type-cover](https://github.com/yuroka-studio/type-cover): deterministic, code-generated typographic cover art.
+- [play-dev-site](https://github.com/yuroka-studio/play-dev-site): a static developer website with the privacy and account-deletion pages Google Play asks for.
 
 ## License
 

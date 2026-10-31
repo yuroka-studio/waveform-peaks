@@ -1,11 +1,11 @@
 // Public API: analyse audio files, or reuse the pieces.
 import path from "node:path";
 import { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, resolveOptions } from "../docs/peaks.js";
-import { DecoderFailedError, NoDecoderError, findDecoder, withDecodedWav } from "./external.js";
+import { DecoderFailedError, NoDecoderError, UnsafeInputError, assertSafeInput, findDecoder, withDecodedWav } from "./external.js";
 import { WavError, bufferSource, decodeWav, fileSource, readChunks, readHeader } from "./wav.js";
 
 export { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, resolveOptions };
-export { DecoderFailedError, NoDecoderError, WavError, bufferSource, decodeWav, fileSource, findDecoder, readChunks, readHeader, withDecodedWav };
+export { DecoderFailedError, NoDecoderError, UnsafeInputError, WavError, assertSafeInput, bufferSource, decodeWav, fileSource, findDecoder, readChunks, readHeader, withDecodedWav };
 
 async function analyzeWavPath(wavPath, options) {
   const source = await fileSource(wavPath);
@@ -31,6 +31,7 @@ async function analyzeWavPath(wavPath, options) {
 export async function analyzeFile(file, options = {}) {
   const opts = resolveOptions(options);
   const named = (result) => ({ file: path.basename(file), ...result });
+  await assertSafeInput(file); // regular, binary file only (also keeps a FIFO or device from blocking the open below)
   try {
     return named(await analyzeWavPath(file, opts));
   } catch (err) {

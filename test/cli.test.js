@@ -6,13 +6,15 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { FRAMES, SAMPLE_RATE } from "../scripts/make-fixtures.mjs";
-import { NoDecoderError, analyzeFile, findDecoder, withDecodedWav } from "../src/index.js";
+import { NoDecoderError, UnsafeInputError, analyzeFile, assertSafeInput, findDecoder, withDecodedWav } from "../src/index.js";
 import { formatJson, main } from "../src/cli.js";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(root, "bin", "waveform-peaks.js");
 const fx = (name) => path.join(root, "test", "fixtures", `${name}.wav`);
 const run = (args, env = {}) => spawnSync(process.execPath, [bin, ...args], { encoding: "utf8", env: { ...process.env, ...env } });
+/** Bytes that are not text and not WAV, standing in for an MP3/FLAC: the decoder (real or fake) gets to decide. */
+const BINARY = Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x01, 0x02, 0x80]);
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "wp-test-"));
 
 test("prints one JSON object for one file, with the documented fields and only a base name", () => {
@@ -91,7 +93,7 @@ test("main() is usable in-process with injected streams", async () => {
 test("without any decoder, a non-WAV file fails with a clear message that points to the browser page", async () => {
   const dir = tmp();
   const song = path.join(dir, "song.mp3");
-  fs.writeFileSync(song, "ID3 not really audio");
+  fs.writeFileSync(song, BINARY);
   try {
     await assert.rejects(analyzeFile(song, { decoder: null }), (e) => e instanceof NoDecoderError && /browser page/.test(e.message) && /nothing is ever downloaded/.test(e.message) && !e.message.includes(dir));
   } finally {
@@ -118,7 +120,7 @@ test("non-WAV input goes through ffmpeg on PATH to a temporary WAV, which is rem
   const dir = tmp();
   fakeFfmpeg(dir, 'for last; do :; done\necho "$@" > "$FAKE_FFMPEG_LOG"\n/bin/cp "$FAKE_FFMPEG_WAV" "$last"');
   const song = path.join(dir, "song.mp3");
-  fs.writeFileSync(song, "pretend mp3");
+  fs.writeFileSync(song, BINARY);
   const log = path.join(dir, "args.txt");
   try {
     const r = run(["--bars", "6", song], { PATH: dir, FAKE_FFMPEG_WAV: fx("stereo-pcm16"), FAKE_FFMPEG_LOG: log });
@@ -136,7 +138,7 @@ test("non-WAV input goes through ffmpeg on PATH to a temporary WAV, which is rem
 test("the temp folder is removed whether decoding works or fails", { skip: process.platform === "win32" }, async () => {
   const dir = tmp();
   const song = path.join(dir, "song.flac");
-  fs.writeFileSync(song, "pretend flac");
+  fs.writeFileSync(song, BINARY);
   const before = () => fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith("waveform-peaks-")).length;
   const n0 = before();
   try {
@@ -176,4 +178,93 @@ test("real decoder smoke test (macOS afconvert): an AAC file made from a synthet
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- hardening: the input file is untrusted --------------------------------------------------------------------
+
+const M3U8 = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nhttp://example.invalid/segment0.ts\n#EXT-X-ENDLIST\n";
+
+test("ffmpeg is started with a protocol whitelist before -i, and the input is an absolute file: path", () => {
+  const dec = findDecoder({ env: { PATH: "/bin" }, platform: "linux", isExec: (f) => f === "/bin/ffmpeg" });
+  const args = dec.args("/music/-evil name.mp3", "/tmp/out.wav");
+  const at = (x) => args.indexOf(x);
+  assert.deepEqual(args.slice(at("-protocol_whitelist"), at("-protocol_whitelist") + 2), ["-protocol_whitelist", "file"]);
+  assert.ok(at("-protocol_whitelist") < at("-i"), "the whitelist is an input option and must come before -i");
+  assert.equal(args[at("-i") + 1], "file:/music/-evil name.mp3");
+  assert.equal(args[args.length - 1], "/tmp/out.wav");
+});
+
+test("a playlist named x.mp3 that points at a URL is refused before any decoder starts, so there is no network access", { skip: process.platform === "win32" }, async () => {
+  const dir = tmp();
+  const log = path.join(dir, "invoked.txt");
+  // a decoder stand-in that would record being started; it must never be
+  fakeFfmpeg(dir, `echo started >> "${log}"\nexit 1`);
+  const decoder = findDecoder({ env: { PATH: dir } });
+  const evil = path.join(dir, "x.mp3");
+  try {
+    for (const body of [M3U8, "ffconcat version 1.0\nfile '/etc/hosts'\n", "[playlist]\nFile1=http://example.invalid/a.mp3\n", "<?xml version=\"1.0\"?><MPD></MPD>"]) {
+      fs.writeFileSync(evil, body);
+      await assert.rejects(analyzeFile(evil, { decoder }), (e) => e instanceof UnsafeInputError && /plain text file/.test(e.message));
+    }
+    assert.ok(!fs.existsSync(log), "the decoder must not have been started");
+    // same through the command line, with that decoder first on PATH
+    fs.writeFileSync(evil, M3U8);
+    const r = run([evil], { PATH: dir });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /Refusing to decode "x\.mp3"/);
+    assert.ok(!fs.existsSync(log));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("directories and binary audio-like files are not mistaken for text", async () => {
+  const dir = tmp();
+  try {
+    await assert.rejects(assertSafeInput(dir), UnsafeInputError);
+    await assertSafeInput(fx("sine-pcm16-mono")); // WAV header has NUL bytes
+    const mp3 = path.join(dir, "a.mp3");
+    fs.writeFileSync(mp3, Buffer.concat([Buffer.from("ID3\x03\x00\x00\x00\x00\x00\x00", "latin1"), Buffer.from([0xff, 0xfb, 0x90, 0x00])]));
+    await assertSafeInput(mp3);
+    fs.writeFileSync(path.join(dir, "empty.mp3"), "");
+    await assertSafeInput(path.join(dir, "empty.mp3")); // not text; the decoder will say what is wrong
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a file name that starts with a dash is passed as an absolute path, never as an option", { skip: process.platform === "win32" }, async () => {
+  const dir = tmp();
+  const log = path.join(dir, "args.txt");
+  fakeFfmpeg(dir, `for last; do :; done\nprintf '%s\\n' "$@" > "${log}"\n/bin/cp "${fx("sine-pcm16-mono")}" "$last"`);
+  const decoder = findDecoder({ env: { PATH: dir } });
+  const odd = path.join(dir, "-i; touch pwned #.mp3"); // also full of shell metacharacters
+  fs.writeFileSync(odd, Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x00, 0x01]));
+  try {
+    const old = process.cwd();
+    process.chdir(dir);
+    try {
+      const out = await analyzeFile("-i; touch pwned #.mp3", { decoder }); // relative name, as typed on a command line
+      assert.equal(out.file, "-i; touch pwned #.mp3");
+    } finally {
+      process.chdir(old);
+    }
+    const seen = fs.readFileSync(log, "utf8").split("\n");
+    const input = seen[seen.indexOf("-i") + 1];
+    assert.ok(input.startsWith("file:/"), input);
+    assert.ok(input.endsWith("/-i; touch pwned #.mp3"), input);
+    assert.ok(!fs.existsSync(path.join(dir, "pwned")), "no shell ever saw the file name");
+    const afc = { name: "afconvert", bin: "/usr/bin/afconvert", args: findDecoder({ env: {}, platform: "darwin", isExec: (f) => f === "/usr/bin/afconvert" }).args };
+    assert.ok(afc.args("/abs/-x.m4a", "/tmp/o.wav").includes("/abs/-x.m4a"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("no shell anywhere: the only process started by the library is execFile with an argument array", () => {
+  const code = ["cli.js", "external.js", "index.js", "wav.js"].map((f) => fs.readFileSync(path.join(root, "src", f), "utf8")).join("\n");
+  assert.match(code, /execFile\(/);
+  assert.ok(!/\b(exec|execSync|spawnSync|spawn|fork)\(/.test(code.replace(/execFile\(/g, "")), "only execFile may start a process");
+  assert.ok(!/shell:\s*true/.test(code));
+  assert.match(code, /shell:\s*false/);
 });

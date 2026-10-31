@@ -132,6 +132,8 @@ export function decodeFrames(buf, offset, frames, header) {
 
 /** Async generator over the audio in blocks of up to `framesPerChunk` frames. */
 export async function* readChunks(source, header, framesPerChunk = 1 << 16) {
+  // at most about 8 MB of raw bytes per block, however many channels the header claims
+  framesPerChunk = Math.max(1, Math.min(framesPerChunk, Math.floor((8 << 20) / header.blockAlign)));
   let done = 0;
   while (done < header.frames) {
     const want = Math.min(framesPerChunk, header.frames - done);

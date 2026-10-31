@@ -84,7 +84,7 @@ The command line decodes WAV itself. For anything else it looks for a decoder th
 1. `ffmpeg` on your `PATH`
 2. `/usr/bin/afconvert` (macOS, built in; handles AAC/M4A, MP3 and FLAC)
 
-It never downloads or installs anything. If neither exists it stops with a message that points to the browser page. A temporary 32-bit float WAV keeps the channel count and sample rate of the source.
+It never downloads or installs anything (see [Security](#security) for how the decoder is started). If neither exists it stops with a message that points to the browser page. A temporary 32-bit float WAV keeps the channel count and sample rate of the source.
 
 ## Browser page
 
@@ -152,6 +152,18 @@ const same = analyze({ channels: [left, right], sampleRate: 44100 }, { bars: 96 
 `waveform-peaks/peaks` exports only the algorithm (`analyze`, the streaming `Analyzer`, `downmixToMono`) and runs in a browser as well. Other exports: `decodeWav`, `readHeader`, `readChunks`, `findDecoder`, `withDecodedWav`.
 
 WAV files are read in blocks, so long files do not have to fit in memory.
+
+## Security
+
+Audio files can come from anywhere, so the command line treats them as untrusted when it hands them to another program:
+
+- **No shell.** The only process the tool ever starts is `ffmpeg` or `afconvert`, through `execFile` with an argument array. File names are never put into a command string.
+- **No option injection.** The input is resolved to an absolute path first, so a file called `-something.mp3` cannot be read as a flag.
+- **ffmpeg is limited to local files.** It runs with `-protocol_whitelist file` (placed before `-i`) and the input is passed as `file:<absolute path>`, so it can neither treat the name as a URL nor open `http`, `tcp`, `pipe`, `concat:` or any other protocol.
+- **Playlists are refused.** Real audio is binary. A file whose first 512 bytes are plain text (an HLS/M3U8 playlist, an `ffconcat` list, PLS, SDP, a DASH manifest, ...) is rejected before any decoder starts, as are directories and other non-regular files. This is what stops a crafted `song.mp3` from steering a decoder to other URLs or local files. A test covers an M3U8 pointing at an `.invalid` host named `x.mp3`: it fails with no decoder run and so no network access.
+- **Temporary files** go into a private folder created with `mkdtemp`, and are removed even when decoding fails. A decoder run is killed after 10 minutes.
+
+The built-in WAV decoder reads in blocks of at most about 8 MB and never allocates by a size declared in the header, so a hostile WAV cannot make it exhaust memory. The browser page decodes with the browser's own audio stack inside a strict Content-Security-Policy.
 
 ## Tests
 

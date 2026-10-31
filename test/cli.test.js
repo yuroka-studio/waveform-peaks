@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { FRAMES, SAMPLE_RATE } from "../scripts/make-fixtures.mjs";
-import { NoDecoderError, UnsafeInputError, analyzeFile, assertSafeInput, findDecoder, withDecodedWav } from "../src/index.js";
+import { FRAMES, SAMPLE_RATE, makeWav, signals } from "../scripts/make-fixtures.mjs";
+import { FFMPEG_FORMAT_WHITELIST, NoDecoderError, UnsafeInputError, analyzeFile, assertSafeInput, findDecoder, looksLikePlaylist, withDecodedWav } from "../src/index.js";
 import { formatJson, main } from "../src/cli.js";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -184,14 +184,25 @@ test("real decoder smoke test (macOS afconvert): an AAC file made from a synthet
 
 const M3U8 = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nhttp://example.invalid/segment0.ts\n#EXT-X-ENDLIST\n";
 
-test("ffmpeg is started with a protocol whitelist before -i, and the input is an absolute file: path", () => {
+test("ffmpeg is started with protocol and format whitelists before -i, and the input is an absolute file: path", () => {
   const dec = findDecoder({ env: { PATH: "/bin" }, platform: "linux", isExec: (f) => f === "/bin/ffmpeg" });
   const args = dec.args("/music/-evil name.mp3", "/tmp/out.wav");
   const at = (x) => args.indexOf(x);
   assert.deepEqual(args.slice(at("-protocol_whitelist"), at("-protocol_whitelist") + 2), ["-protocol_whitelist", "file"]);
-  assert.ok(at("-protocol_whitelist") < at("-i"), "the whitelist is an input option and must come before -i");
+  assert.equal(args[at("-format_whitelist") + 1], FFMPEG_FORMAT_WHITELIST);
+  // both are input options: they only apply when they come before -i
+  assert.ok(at("-protocol_whitelist") > -1 && at("-protocol_whitelist") < at("-i"));
+  assert.ok(at("-format_whitelist") > -1 && at("-format_whitelist") < at("-i"));
   assert.equal(args[at("-i") + 1], "file:/music/-evil name.mp3");
   assert.equal(args[args.length - 1], "/tmp/out.wav");
+  assert.equal(args.filter((a) => a === "-i").length, 1);
+});
+
+test("the format whitelist lists plain audio demuxers and none of the playlist-style ones", () => {
+  const allowed = FFMPEG_FORMAT_WHITELIST.split(",");
+  for (const ok of ["mp3", "mov", "m4a", "flac", "ogg", "wav", "aac", "matroska", "caf"]) assert.ok(allowed.includes(ok), ok);
+  for (const never of ["hls", "applehttp", "concat", "dash", "sdp", "rtsp", "image2", "lavfi", "pls", "asx", "tee"]) assert.ok(!allowed.includes(never), never);
+  assert.ok(!/\s/.test(FFMPEG_FORMAT_WHITELIST));
 });
 
 test("a playlist named x.mp3 that points at a URL is refused before any decoder starts, so there is no network access", { skip: process.platform === "win32" }, async () => {
@@ -204,7 +215,7 @@ test("a playlist named x.mp3 that points at a URL is refused before any decoder 
   try {
     for (const body of [M3U8, "ffconcat version 1.0\nfile '/etc/hosts'\n", "[playlist]\nFile1=http://example.invalid/a.mp3\n", "<?xml version=\"1.0\"?><MPD></MPD>"]) {
       fs.writeFileSync(evil, body);
-      await assert.rejects(analyzeFile(evil, { decoder }), (e) => e instanceof UnsafeInputError && /plain text file/.test(e.message));
+      await assert.rejects(analyzeFile(evil, { decoder }), (e) => e instanceof UnsafeInputError && /looks like a playlist/.test(e.message));
     }
     assert.ok(!fs.existsSync(log), "the decoder must not have been started");
     // same through the command line, with that decoder first on PATH
@@ -213,6 +224,61 @@ test("a playlist named x.mp3 that points at a URL is refused before any decoder 
     assert.equal(r.status, 1);
     assert.match(r.stderr, /Refusing to decode "x\.mp3"/);
     assert.ok(!fs.existsSync(log));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** An ID3v2 tag (header plus `padding` zero bytes), syncsafe size included. */
+const id3 = (padding) => Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0, 0, (padding >> 7) & 0x7f, padding & 0x7f]), Buffer.alloc(padding)]);
+
+test("playlists cannot slip past by hiding behind an ID3v2 tag or by carrying non-ASCII bytes", { skip: process.platform === "win32" }, async () => {
+  const dir = tmp();
+  const log = path.join(dir, "invoked.txt");
+  fakeFfmpeg(dir, `echo started >> "${log}"\nexit 1`);
+  const decoder = findDecoder({ env: { PATH: dir } });
+  const evil = path.join(dir, "x.mp3");
+  const playlist = "#EXTM3U\n#EXTINF:1,\nhttp://example.invalid/seg.ts\n";
+  const cases = {
+    "ID3v2 header + non-ASCII byte + m3u8": Buffer.concat([id3(20), Buffer.from([0xe9]), Buffer.from(playlist)]),
+    "two ID3v2 tags in a row": Buffer.concat([id3(5), id3(300), Buffer.from(playlist)]),
+    "ID3v2 with a footer flag": Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x10, 0, 0, 0, 4]), Buffer.alloc(4), Buffer.alloc(10), Buffer.from(playlist)]),
+    "non-ASCII bytes around the signature": Buffer.concat([Buffer.from([0xff, 0xfe, 0x80]), Buffer.from(`#extm3u\n# caf\u00e9\n`, "latin1"), Buffer.from([0x00, 0xc3, 0xa9]), Buffer.from(playlist)]),
+    "m3u8 with a UTF-8 BOM": Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(playlist)]),
+    "ffconcat after a binary prefix": Buffer.concat([id3(10), Buffer.from([0x80, 0x81]), Buffer.from("ffconcat version 1.0\nfile '/etc/hosts'\n")]),
+    "DASH manifest with XML prolog": Buffer.from('\ufeff<?xml version="1.0"?>\n<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"></MPD>'),
+    "SDP": Buffer.from("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=x\r\n"),
+  };
+  try {
+    for (const [name, bytes] of Object.entries(cases)) {
+      fs.writeFileSync(evil, bytes);
+      await assert.rejects(analyzeFile(evil, { decoder }), (e) => e instanceof UnsafeInputError, name);
+    }
+    assert.ok(!fs.existsSync(log), "the decoder must not have been started for any of them");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real audio is not mistaken for a playlist, even when it carries XML metadata", async () => {
+  const dir = tmp();
+  try {
+    // a BWF-style WAV with an iXML chunk before the audio, and an MP3-like file with an ID3v2 tag
+    const ixml = Buffer.alloc(40);
+    ixml.write('<?xml version="1.0"?><BWFXML><X/></BWFXML>', "latin1");
+    const head = Buffer.from("iXML");
+    const lenBuf = Buffer.alloc(4);
+    lenBuf.writeUInt32LE(ixml.length);
+    const wav = makeWav([signals.sine(0.5)()], { kind: "pcm", bits: 16, beforeData: [Buffer.concat([head, lenBuf, ixml])] });
+    const wavPath = path.join(dir, "bwf.wav");
+    fs.writeFileSync(wavPath, wav);
+    const r = await analyzeFile(wavPath, { bars: 4, decoder: null });
+    assert.equal(r.bars, 4);
+    await assertSafeInput(wavPath);
+    const mp3 = path.join(dir, "a.mp3");
+    fs.writeFileSync(mp3, Buffer.concat([id3(64), Buffer.from([0xff, 0xfb, 0x90, 0x00]), Buffer.alloc(100, 0x55)]));
+    await assertSafeInput(mp3);
+    assert.equal(looksLikePlaylist(Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x3c, 0x3f, 0x78, 0x6d, 0x6c])), null); // "<?xml" bytes mid-file are not a manifest
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

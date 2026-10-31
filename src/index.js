@@ -1,11 +1,11 @@
 // Public API: analyse audio files, or reuse the pieces.
 import path from "node:path";
 import { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, resolveOptions } from "../docs/peaks.js";
-import { DecoderFailedError, NoDecoderError, UnsafeInputError, assertSafeInput, findDecoder, withDecodedWav } from "./external.js";
+import { DecoderFailedError, NoDecoderError, UnsafeInputError, FFMPEG_FORMAT_WHITELIST, assertSafeInput, findDecoder, looksLikePlaylist, withDecodedWav } from "./external.js";
 import { WavError, bufferSource, decodeWav, fileSource, readChunks, readHeader } from "./wav.js";
 
 export { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, resolveOptions };
-export { DecoderFailedError, NoDecoderError, UnsafeInputError, WavError, assertSafeInput, bufferSource, decodeWav, fileSource, findDecoder, readChunks, readHeader, withDecodedWav };
+export { DecoderFailedError, NoDecoderError, UnsafeInputError, FFMPEG_FORMAT_WHITELIST, WavError, assertSafeInput, looksLikePlaylist, bufferSource, decodeWav, fileSource, findDecoder, readChunks, readHeader, withDecodedWav };
 
 async function analyzeWavPath(wavPath, options) {
   const source = await fileSource(wavPath);

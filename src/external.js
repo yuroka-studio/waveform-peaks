@@ -9,9 +9,10 @@
 //     (afconvert has no "--" separator, absolute paths are how it is made safe);
 //   * ffmpeg gets "-protocol_whitelist file" and the input as "file:<absolute path>", so it can
 //     neither parse the name as a URL nor open network (or pipe, concat:, ...) protocols;
-//   * files that are plain text (HLS/M3U8, ffconcat, PLS, SDP, DASH/XML playlists ...) are refused before
-//     any decoder runs: real audio is binary, and playlist-style demuxers are how a crafted file would
-//     make a decoder reach for other URLs or local files.
+//   * ffmpeg also gets "-format_whitelist" with plain audio demuxers only. That is the real defence against
+//     playlist-style inputs (HLS/M3U8, ffconcat, DASH, SDP ...) that make a decoder open other URLs or local
+//     files: ffmpeg's content probe is not allowed to pick them, whatever the file is called or starts with;
+//   * on top of that, a signature check refuses files that look like such playlists before any decoder starts.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -53,6 +54,9 @@ function isExecutable(file) {
 }
 
 /** Find a decoder that is already on this machine. Pure lookup, nothing is run. */
+/** Demuxers ffmpeg may use: plain audio containers that never open nested files. Everything else (hls, concat, dash, sdp ...) is off. */
+export const FFMPEG_FORMAT_WHITELIST = "mp3,mov,mp4,m4a,3gp,3g2,mj2,flac,ogg,wav,aiff,aac,matroska,webm,caf";
+
 export function findDecoder({ env = process.env, platform = process.platform, isExec = isExecutable } = {}) {
   const exts = platform === "win32" ? [".exe", ".cmd", ""] : [""];
   for (const dir of (env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
@@ -62,12 +66,13 @@ export function findDecoder({ env = process.env, platform = process.platform, is
         return {
           name: "ffmpeg",
           bin: candidate,
-          // `input` is already absolute. "file:" pins the file protocol, and the whitelist (an input option, so it must
-          // come before -i) forbids every other one. Float32 keeps lossy decoder output that overshoots full scale;
+          // `input` is already absolute. "file:" pins the file protocol, and the two whitelists (input options, so they
+          // must come before -i) forbid every other protocol and every demuxer that is not a plain audio container. Float32 keeps lossy decoder output that overshoots full scale;
           // channels and sample rate are left as they are.
           args: (input, output) => [
             "-nostdin", "-v", "error",
             "-protocol_whitelist", "file",
+            "-format_whitelist", FFMPEG_FORMAT_WHITELIST,
             "-i", `file:${input}`,
             "-map", "0:a:0", "-vn", "-sn", "-dn",
             "-c:a", "pcm_f32le", "-f", "wav", "-y", output,
@@ -87,20 +92,52 @@ export function findDecoder({ env = process.env, platform = process.platform, is
   return null;
 }
 
+const PLAYLIST_WINDOW = 64 * 1024;
+// Text that only playlist-style inputs contain. Matched anywhere in the window, case-insensitively, with any
+// bytes (including non-ASCII ones) around it. "<?xml" and SDP are matched at the start of the content only:
+// real audio files (BWF/iXML in a WAV, XMP in a FLAC or MP4) legitimately carry XML further in.
+const PLAYLIST_SIGNATURES = ["#extm3u", "#ext-x-", "#extinf", "ffconcat", "[playlist]", "<mpd", "<asx"];
+
+/** @param {Buffer} window the first bytes of the audio data, after any ID3v2 tag @returns {string|null} what matched */
+export function looksLikePlaylist(window) {
+  const text = window.toString("latin1").toLowerCase();
+  for (const sig of PLAYLIST_SIGNATURES) if (text.includes(sig)) return sig;
+  const start = text.replace(/^\u00ef\u00bb\u00bf/, "").replace(/^\s+/, "");
+  if (start.startsWith("<?xml")) return "<?xml";
+  if (/^v=0\r?\n/.test(start)) return "v=0 (SDP)";
+  return null;
+}
+
+/** Length in bytes of the ID3v2 tag at the start of `head` (header, body and footer), or 0 if there is none. */
+function id3v2Length(head) {
+  if (head.length < 10 || head.toString("latin1", 0, 3) !== "ID3" || head[3] === 0xff || head[4] === 0xff) return 0;
+  if ((head[6] | head[7] | head[8] | head[9]) & 0x80) return 0; // size bytes are 7-bit "syncsafe"
+  const size = (head[6] << 21) | (head[7] << 14) | (head[8] << 7) | head[9];
+  return 10 + size + (head[5] & 0x10 ? 10 : 0);
+}
+
 /**
- * Refuse anything that is not a regular, binary file. Playlists and other text formats are the way a crafted
- * "song.mp3" would steer a decoder to fetch URLs or read other local files, and no audio container is plain text.
+ * Refuse directories and other non-regular files, and files that look like playlists. ffmpeg skips ID3v2 tags
+ * while probing, so a playlist can hide behind one: skip them here too (also several in a row).
  */
 export async function assertSafeInput(file) {
   const st = await fs.promises.stat(file); // ENOENT surfaces as-is
   if (!st.isFile()) throw new UnsafeInputError(file, "it is not a regular file.");
   const fh = await fs.promises.open(file, "r");
   try {
-    const head = Buffer.alloc(512);
-    const { bytesRead } = await fh.read(head, 0, 512, 0);
-    const text = bytesRead > 0 && head.subarray(0, bytesRead).every((b) => b === 9 || b === 10 || b === 13 || (b >= 32 && b < 127));
-    if (text) {
-      throw new UnsafeInputError(file, "it is a plain text file (a playlist or similar), not audio. Playlists can point a decoder at other files or URLs, so they are never passed on.");
+    let pos = 0;
+    for (let i = 0; i < 16; i++) {
+      const head = Buffer.alloc(10);
+      const { bytesRead } = await fh.read(head, 0, 10, pos);
+      const len = id3v2Length(head.subarray(0, bytesRead));
+      if (len === 0) break;
+      pos += len;
+    }
+    const buf = Buffer.alloc(PLAYLIST_WINDOW);
+    const { bytesRead } = await fh.read(buf, 0, PLAYLIST_WINDOW, pos);
+    const hit = looksLikePlaylist(buf.subarray(0, bytesRead));
+    if (hit) {
+      throw new UnsafeInputError(file, `it looks like a playlist or manifest (found "${hit}"), not audio. Those can point a decoder at other files or URLs, so they are never passed on.`);
     }
   } finally {
     await fh.close();

@@ -20,9 +20,24 @@ export function prng(seed) {
   };
 }
 
+/**
+ * sin(x) from + - * / and Math.round only. Math.sin can differ in the last bit between CPUs
+ * (arm64 and x64 builds of V8 disagree), and the float64 fixture stores every bit; these
+ * operations are rounded the same way on every IEEE 754 machine. Accurate to about 1e-12 here.
+ */
+export function portableSin(x) {
+  let r = x - 2 * Math.PI * Math.round(x / (2 * Math.PI)); // [-pi, pi]
+  if (r > Math.PI / 2) r = Math.PI - r; // fold to [-pi/2, pi/2]
+  else if (r < -Math.PI / 2) r = -Math.PI - r;
+  const r2 = r * r;
+  let t = 1; // Taylor series to r^25 in Horner form; the next term is below 1e-20 on [-pi/2, pi/2]
+  for (let k = 12; k >= 1; k--) t = 1 - (r2 / (2 * k * (2 * k + 1))) * t;
+  return r * t;
+}
+
 /** The ideal signals, as float64 per channel. Tests compare decoded files against these. */
 export const signals = {
-  sine: (amp, hz = 400) => (frames = FRAMES) => Float64Array.from({ length: frames }, (_, i) => amp * Math.sin((2 * Math.PI * hz * i) / SAMPLE_RATE)),
+  sine: (amp, hz = 400) => (frames = FRAMES) => Float64Array.from({ length: frames }, (_, i) => amp * portableSin((2 * Math.PI * hz * i) / SAMPLE_RATE)),
   square: (amp, period = 20) => (frames = FRAMES) => Float64Array.from({ length: frames }, (_, i) => (i % period < period / 2 ? amp : -amp)),
   silence: () => (frames = FRAMES) => new Float64Array(frames),
   noise: (amp, seed) => (frames = FRAMES) => {

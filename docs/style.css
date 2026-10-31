@@ -1,0 +1,95 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0b12;
+  --panel: #12121c;
+  --line: #2a2a40;
+  --ink: #ece9f2;
+  --muted: #a9a6bb;
+  --accent: #5fd0c4;
+  --accent-ink: #06201d;
+  --focus: #ffd166;
+  --danger: #ff8c8c;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  margin: 0;
+  color: var(--ink);
+  background: var(--bg);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+h1 { margin: 0 0 .25rem; font: 700 1.75rem/1.2 var(--mono); letter-spacing: -.01em; }
+h2 { font-size: 1.05rem; margin: 0; }
+.lede { margin: 0 0 1rem; color: var(--muted); font-size: 1.05rem; }
+.privacy { margin: 0 0 2rem; padding: .75rem 1rem; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--panel); }
+code { font-family: var(--mono); font-size: .92em; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* drop zone: the real file input stays focusable, its label is the visible target */
+.drop { position: relative; margin-bottom: 1.25rem; }
+.drop input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.drop label {
+  display: flex; flex-direction: column; align-items: center; gap: .25rem; text-align: center;
+  padding: 2.25rem 1rem; border: 1.5px dashed #4a4a66; border-radius: 10px; background: var(--panel);
+  pointer-events: none;
+}
+.drop-title { font-weight: 600; }
+.drop-sub { color: var(--muted); font-size: .92rem; }
+.drop:hover label, .drop.over label { border-color: var(--accent); background: #14201f; }
+.drop input:focus-visible + label { outline: 3px solid var(--focus); outline-offset: 3px; border-color: var(--accent); }
+
+.options { display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: flex-start; margin-bottom: 1rem; }
+.field { display: flex; flex-direction: column; gap: .25rem; margin: 0; padding: 0; border: 0; min-width: 0; }
+.field > label:not(.choice), legend { font-weight: 600; padding: 0; }
+.hint { color: var(--muted); font-size: .85rem; }
+.choice { display: inline-flex; align-items: center; gap: .5rem; margin-right: 1rem; }
+input[type="number"] {
+  width: 6.5rem; padding: .5rem .6rem; color: var(--ink); background: var(--panel);
+  border: 1px solid #4a4a66; border-radius: 6px; font: inherit; font-family: var(--mono);
+}
+input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width: 1.1rem; height: 1.1rem; margin: 0; }
+
+button {
+  font: inherit; font-weight: 600; color: var(--accent-ink); background: var(--accent);
+  border: 1px solid var(--accent); border-radius: 6px; padding: .45rem .9rem; cursor: pointer;
+}
+button:hover { filter: brightness(1.08); }
+button.quiet { color: var(--ink); background: transparent; border-color: #4a4a66; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+.status { min-height: 1.5rem; margin: 0 0 1rem; color: var(--muted); }
+.status.error { color: var(--danger); }
+
+.results-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: .75rem; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.results { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; }
+.card { padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.card.failed { border-color: var(--danger); }
+.card h3 { margin: 0 0 .15rem; font-size: 1rem; overflow-wrap: anywhere; }
+.meta { margin: 0 0 .75rem; color: var(--muted); font: .85rem/1.4 var(--mono); }
+.wave { display: block; width: 100%; height: auto; margin: .25rem 0 .75rem; background: #0e0e17; border-radius: 6px; }
+.wave .peak { fill: #4b4b6b; }
+.wave .rms { fill: var(--accent); }
+.wave .axis { stroke: #2a2a40; stroke-width: 1; }
+.legend { display: flex; gap: 1rem; margin: 0 0 .75rem; color: var(--muted); font-size: .85rem; }
+.legend i { display: inline-block; width: .8rem; height: .8rem; margin-right: .35rem; vertical-align: -.1rem; border-radius: 2px; }
+.legend .k-peak { background: #4b4b6b; }
+.legend .k-rms { background: var(--accent); }
+details { margin-top: .75rem; }
+summary { cursor: pointer; color: var(--muted); }
+pre { margin: .5rem 0 0; padding: .75rem; max-height: 14rem; overflow: auto; background: #0e0e17; border: 1px solid var(--line); border-radius: 6px; font: .8rem/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
+
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .9rem; }
+[hidden] { display: none !important; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .drop label, button { transition: border-color .15s ease, background-color .15s ease, filter .15s ease; }
+}
+@media (forced-colors: active) {
+  .wave .peak, .wave .rms { fill: CanvasText; }
+  .wave .rms { fill: Highlight; }
+}

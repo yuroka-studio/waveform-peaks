@@ -1,0 +1,24 @@
+{
+  "name": "waveform-peaks",
+  "version": "0.1.0",
+  "description": "Turn a song into compact waveform data (N normalised peak and RMS bars) for web players. CLI, library and an offline browser page. No dependencies.",
+  "keywords": ["waveform", "peaks", "audio", "wav", "player", "svg", "web-audio"],
+  "license": "MIT",
+  "author": "Yuroka Studio",
+  "homepage": "https://github.com/yuroka-studio/waveform-peaks#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/yuroka-studio/waveform-peaks.git" },
+  "bugs": { "url": "https://github.com/yuroka-studio/waveform-peaks/issues" },
+  "type": "module",
+  "bin": { "waveform-peaks": "bin/waveform-peaks.js" },
+  "exports": {
+    ".": "./src/index.js",
+    "./peaks": "./docs/peaks.js"
+  },
+  "files": ["bin", "src", "docs/peaks.js", "LICENSE", "README.md"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "serve": "node scripts/serve-docs.mjs"
+  }
+}

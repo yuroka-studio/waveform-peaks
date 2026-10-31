@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Turn songs into compact waveform data (normalised peak and RMS bars) for web players. Runs entirely in your browser: nothing is uploaded.">
+  <title>waveform-peaks: waveform bars from your audio, in your browser</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>waveform-peaks</h1>
+      <p class="lede">Turn songs into compact waveform data for web players: N normalised bars, peak and RMS.</p>
+      <p class="privacy"><strong>Nothing is uploaded.</strong> Your files are decoded and analysed inside this tab with the Web Audio API. This page makes no network requests and has no analytics.</p>
+    </header>
+
+    <section aria-labelledby="pick-h">
+      <h2 id="pick-h" class="sr-only">Choose audio files</h2>
+      <div class="drop" id="drop">
+        <input type="file" id="files" multiple accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.weba">
+        <label for="files">
+          <span class="drop-title">Drop audio files here, or choose files</span>
+          <span class="drop-sub">MP3, M4A, WAV, FLAC, OGG and more, whatever your browser can play</span>
+        </label>
+      </div>
+    </section>
+
+    <section aria-labelledby="opt-h">
+      <h2 id="opt-h" class="sr-only">Options</h2>
+      <form id="options" class="options" autocomplete="off">
+        <div class="field">
+          <label for="bars">Bars</label>
+          <input type="number" id="bars" name="bars" min="1" max="1000" step="1" value="96" inputmode="numeric" aria-describedby="bars-hint">
+          <span id="bars-hint" class="hint">1 to 1000</span>
+        </div>
+        <fieldset class="field">
+          <legend>Mode</legend>
+          <label class="choice"><input type="radio" name="mode" value="peak" checked> Peak</label>
+          <label class="choice"><input type="radio" name="mode" value="rms"> RMS</label>
+          <span class="hint" id="mode-hint">Which series the loudest bar is scaled against.</span>
+        </fieldset>
+        <div class="field">
+          <label class="choice"><input type="checkbox" id="normalize" name="normalize" checked> Normalise per file</label>
+          <span class="hint">Loudest bar becomes 1.0.</span>
+        </div>
+      </form>
+    </section>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <section id="results-section" aria-labelledby="res-h" hidden>
+      <div class="results-head">
+        <h2 id="res-h">Results</h2>
+        <div class="actions">
+          <button type="button" id="copy-all">Copy all JSON</button>
+          <button type="button" id="download-all">Download all JSON</button>
+          <button type="button" id="clear" class="quiet">Clear</button>
+        </div>
+      </div>
+      <ol id="results" class="results"></ol>
+    </section>
+
+    <footer>
+      <p>Same algorithm as the <code>waveform-peaks</code> command line tool (MIT, Yuroka Studio). Browsers decode at their own audio rate, so <code>sampleRate</code> here may differ from the file's; the bars are practically the same.</p>
+      <p>Prefer a terminal? The repository has a command line tool that reads WAV directly and needs no browser.</p>
+    </footer>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { FRAMES, SAMPLE_RATE, makeWav, signals } from "../scripts/make-fixtures.mjs";
-import { FFMPEG_FORMAT_WHITELIST, NoDecoderError, UnsafeInputError, analyzeFile, assertSafeInput, findDecoder, looksLikePlaylist, withDecodedWav } from "../src/index.js";
+import { FFMPEG_FORMAT_WHITELIST, NoDecoderError, UnsafeInputError, analyzeFile, assertRegularFile, assertSafeInput, findDecoder, looksLikePlaylist, withDecodedWav } from "../src/index.js";
 import { formatJson, main } from "../src/cli.js";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -62,6 +62,29 @@ test("arrays of numbers stay on one line", () => {
   assert.match(text, /"peaks": \[0\.1, 0\.25, 1\]/);
   assert.match(text, /"rms": \[0, 0\.5\]/);
   assert.deepEqual(JSON.parse(text), { a: 1, peaks: [0.1, 0.25, 1], nested: { rms: [0, 0.5] }, name: "x" });
+});
+
+test("a file name with brackets and spaces comes back exactly as it was (strings are never reformatted)", () => {
+  const text = formatJson({ file: "Mix [ 1,  2 ].wav", other: "[ 3 ]", peaks: [0.5, 1], none: [], deep: { rms: [-0.25, 1e-7] } });
+  assert.deepEqual(JSON.parse(text), { file: "Mix [ 1,  2 ].wav", other: "[ 3 ]", peaks: [0.5, 1], none: [], deep: { rms: [-0.25, 1e-7] } });
+  assert.match(text, /"file": "Mix \[ 1,  2 \]\.wav"/);
+  assert.match(text, /"peaks": \[0\.5, 1\]/);
+  assert.match(text, /"none": \[\]/);
+  assert.match(text, /"rms": \[-0\.25, 1e-7\]/);
+  // and through the real command line, with a name that used to be rewritten to "Mix [1].wav"
+  const dir = tmp();
+  try {
+    for (const name of ["Mix [ 1 ].wav", "Mix [ 1,  2 ].wav", "[ 7 ] take [ 8 ].wav"]) {
+      const file = path.join(dir, name);
+      fs.copyFileSync(fx("sine-pcm16-mono"), file);
+      const r = run(["--bars", "3", file]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(JSON.parse(r.stdout).file, name);
+      assert.match(r.stdout, /"peaks": \[[\d., ]+\]/);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("exit codes and messages for bad input", () => {
@@ -333,4 +356,158 @@ test("no shell anywhere: the only process started by the library is execFile wit
   assert.ok(!/\b(exec|execSync|spawnSync|spawn|fork)\(/.test(code.replace(/execFile\(/g, "")), "only execFile may start a process");
   assert.ok(!/shell:\s*true/.test(code));
   assert.match(code, /shell:\s*false/);
+});
+
+// ---- the playlist check guards external decoders only ---------------------------------------------------------------
+
+/** A valid 16-bit mono WAV whose sample bytes (not its header) start with `text`. */
+function wavWithBytes(text) {
+  const wav = makeWav([signals.sine(0.5)()], { kind: "pcm", bits: 16 });
+  wav.write(text, wav.indexOf("data", 12, "latin1") + 8, "latin1");
+  return wav;
+}
+
+test("a valid WAV is read by the built-in decoder even when its sample bytes spell a playlist signature", { skip: process.platform === "win32" }, () => {
+  const dir = tmp();
+  const log = path.join(dir, "invoked.txt");
+  fakeFfmpeg(dir, `echo started >> "${log}"\nexit 1`); // would be used for anything the built-in decoder rejects
+  try {
+    for (const text of ["<mpd", "<asx", "<MPD ", "#EXTM3U\n#EXTINF:1,", "[playlist]", "ffconcat version 1.0"]) {
+      const file = path.join(dir, "bytes.wav");
+      fs.writeFileSync(file, wavWithBytes(text));
+      const r = run(["--bars", "4", file], { PATH: dir });
+      assert.equal(r.status, 0, `${text}: ${r.stderr}`);
+      assert.equal(JSON.parse(r.stdout).bars, 4);
+    }
+    assert.ok(!fs.existsSync(log), "no external decoder was involved");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("directories and other non-regular files are still refused before the built-in decoder opens them", async () => {
+  const dir = tmp();
+  try {
+    await assert.rejects(analyzeFile(dir, { decoder: null }), UnsafeInputError);
+    await assert.rejects(assertRegularFile(dir), UnsafeInputError);
+    await assert.rejects(analyzeFile(path.join(dir, "missing.wav"), { decoder: null }), { code: "ENOENT" });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("<MPD and <asx are only playlist signatures as real tags, so compressed audio is not refused by chance", { skip: process.platform === "win32" }, async () => {
+  for (const tag of ["<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\">", "<mpd>", "<MPD\n", "<mpd/>", "<ASX VERSION=\"3.0\">", "<asx>", "<asx\tversion"]) {
+    assert.ok(looksLikePlaylist(Buffer.concat([Buffer.from([0xff, 0xfb, 0x90, 0x00, 0xe9]), Buffer.from(tag, "latin1"), Buffer.from([0x80])])), tag);
+  }
+  for (const noise of ["<mpd", "<MPDZ", "<mpdx>", "<asx", "<asxy", "<asx\u00a0", "x<asx"]) {
+    assert.equal(looksLikePlaylist(Buffer.from([0xff, 0xfb, 0x90, 0x00, ...Buffer.from(noise, "latin1")])), null, noise);
+  }
+  // end to end: an MP3-like file with such bytes in the middle goes to the decoder instead of being refused
+  const dir = tmp();
+  try {
+    fakeFfmpeg(dir, 'for last; do :; done\n/bin/cp "' + fx("sine-pcm16-mono") + '" "$last"');
+    const decoder = findDecoder({ env: { PATH: dir } });
+    const song = path.join(dir, "song.mp3");
+    fs.writeFileSync(song, Buffer.concat([BINARY, Buffer.from("<mpd"), BINARY, Buffer.from("<asx"), BINARY]));
+    assert.equal((await analyzeFile(song, { bars: 4, decoder })).bars, 4);
+    fs.writeFileSync(song, Buffer.concat([BINARY, Buffer.from("<MPD xmlns="), BINARY]));
+    await assert.rejects(analyzeFile(song, { decoder }), UnsafeInputError);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- interruption ----------------------------------------------------------------------------------------------
+
+test("stopping the tool with Ctrl-C or kill while an external decoder runs removes the temporary WAV and the decoder", { skip: process.platform === "win32" }, async () => {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const dir = tmp();
+    const tmpRoot = path.join(dir, "tmp"); // this process's TMPDIR, so only its own temp folders are looked at
+    fs.mkdirSync(tmpRoot);
+    const pidFile = path.join(dir, "decoder.pid");
+    // writes the decoded WAV, then keeps "decoding" (exec: the pid we record is the one that gets killed)
+    fakeFfmpeg(dir, `for last; do :; done\n/bin/cp "${fx("sine-pcm16-mono")}" "$last"\necho $$ > "${pidFile}.part"\n/bin/mv "${pidFile}.part" "${pidFile}"\nexec sleep 30`);
+    const song = path.join(dir, "song.mp3");
+    fs.writeFileSync(song, BINARY);
+    const child = spawn(process.execPath, [bin, song], { env: { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}`, TMPDIR: tmpRoot }, stdio: "ignore" });
+    const exited = new Promise((resolve) => child.once("exit", (code, sig) => resolve({ code, sig })));
+    let decoderPid;
+    try {
+      for (let i = 0; i < 500 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.ok(fs.existsSync(pidFile), "the decoder never started");
+      decoderPid = Number(fs.readFileSync(pidFile, "utf8"));
+      const [leftBehind] = fs.readdirSync(tmpRoot);
+      assert.match(leftBehind, /^waveform-peaks-/);
+      assert.ok(fs.existsSync(path.join(tmpRoot, leftBehind, "decoded.wav")), "the temporary WAV exists while decoding");
+      child.kill(signal);
+      const { code, sig } = await exited;
+      assert.equal(sig, signal, `the tool still dies from ${signal} (code ${code})`);
+      assert.deepEqual(fs.readdirSync(tmpRoot), [], "the temporary folder is gone");
+      let alive = true;
+      for (let i = 0; i < 100 && alive; i++) {
+        try {
+          process.kill(decoderPid, 0);
+          await new Promise((r) => setTimeout(r, 20));
+        } catch {
+          alive = false;
+        }
+      }
+      assert.ok(!alive, "the decoder process was stopped");
+    } finally {
+      child.kill("SIGKILL");
+      if (decoderPid) try { process.kill(decoderPid, "SIGKILL"); } catch { /* already gone */ }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("signal handlers exist only while a temporary WAV does", { skip: process.platform === "win32" }, async () => {
+  const dir = tmp();
+  try {
+    fakeFfmpeg(dir, 'for last; do :; done\n/bin/cp "' + fx("sine-pcm16-mono") + '" "$last"');
+    const decoder = findDecoder({ env: { PATH: dir } });
+    const song = path.join(dir, "song.mp3");
+    fs.writeFileSync(song, BINARY);
+    const counts = () => [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+    const before = counts();
+    await withDecodedWav(song, async () => assert.deepEqual(counts(), [before[0] + 1, before[1] + 1]), { decoder });
+    assert.deepEqual(counts(), before);
+    await assert.rejects(withDecodedWav(song, async () => { throw new Error("analysis failed"); }, { decoder }), /analysis failed/);
+    assert.deepEqual(counts(), before);
+    await assert.rejects(analyzeFile(song, { decoder: null }), NoDecoderError);
+    assert.deepEqual(counts(), before);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an application with its own SIGINT handler keeps control: the decode is cleaned up and the process is not killed", { skip: process.platform === "win32" }, () => {
+  const dir = tmp();
+  const tmpRoot = path.join(dir, "tmp");
+  fs.mkdirSync(tmpRoot);
+  const started = path.join(dir, "started");
+  fakeFfmpeg(dir, `for last; do :; done\n/bin/cp "${fx("sine-pcm16-mono")}" "$last"\n: > "${started}"\nexec sleep 30`);
+  const song = path.join(dir, "song.mp3");
+  fs.writeFileSync(song, BINARY);
+  const script = `
+    import fs from "node:fs";
+    const { withDecodedWav, findDecoder } = await import(${JSON.stringify(pathToFileURL(path.join(root, "src", "index.js")).href)});
+    const [song, started] = process.argv.slice(1);
+    let handled = false;
+    process.on("SIGINT", () => { handled = true; });
+    const outcome = withDecodedWav(song, async () => {}, { decoder: findDecoder() }).then(() => "finished", (e) => e.name);
+    while (!fs.existsSync(started)) await new Promise((r) => setTimeout(r, 20));
+    process.kill(process.pid, "SIGINT");
+    const result = await outcome;
+    console.log(JSON.stringify({ handled, outcome: result }));
+  `;
+  try {
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", script, song, started], { encoding: "utf8", env: { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}`, TMPDIR: tmpRoot }, timeout: 20000 });
+    assert.equal(r.status, 0, `${r.stderr} (signal ${r.signal})`);
+    assert.deepEqual(JSON.parse(r.stdout), { handled: true, outcome: "DecoderFailedError" });
+    assert.deepEqual(fs.readdirSync(tmpRoot), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

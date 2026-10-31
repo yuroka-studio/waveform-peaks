@@ -19,6 +19,11 @@
 export const DEFAULT_BARS = 96;
 export const MAX_BARS = 10000;
 
+// Real samples are within about +/-1. A damaged float file can hold NaN, +/-Infinity or absurd values: NaN and the
+// infinities count as silence, and finite values are capped here so that squaring them can never overflow.
+const SAMPLE_LIMIT = 1e30;
+const cleanSample = (v) => (v > SAMPLE_LIMIT && v !== Infinity ? SAMPLE_LIMIT : v < -SAMPLE_LIMIT && v !== -Infinity ? -SAMPLE_LIMIT : 0);
+
 const round = (x, places) => {
   const k = 10 ** places;
   return Math.round(x * k) / k;
@@ -83,7 +88,7 @@ export class Analyzer {
       let sum = 0;
       for (let c = 0; c < C; c++) {
         let v = chunk[c][i];
-        if (v !== v) v = 0; // NaN in a damaged float file
+        if (!(v >= -SAMPLE_LIMIT && v <= SAMPLE_LIMIT)) v = cleanSample(v); // NaN, Infinity or huge, in a damaged float file
         sum += v;
         const a = v < 0 ? -v : v;
         if (a > maxAbs) maxAbs = a;
@@ -151,4 +156,13 @@ export function downmixToMono(channels) {
     out[i] = s / channels.length;
   }
   return out;
+}
+
+/**
+ * JSON with indentation, but every array of plain numbers on a single line (the bars are long). Only the lines that
+ * JSON.stringify itself produced for such an array are joined: a string can never contain a raw line break, so
+ * text inside a string (a file name like "Mix [ 1 ].wav") is never touched.
+ */
+export function formatJson(value) {
+  return JSON.stringify(value, null, 2).replace(/\[\n((?:[ \t]*-?\d[\d.eE+-]*,?\n)+)[ \t]*\]/g, (_m, lines) => `[${lines.trim().replace(/\s*\n\s*/g, " ")}]`);
 }

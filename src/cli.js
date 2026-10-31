@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import { parseArgs } from "node:util";
-import { DEFAULT_BARS, MAX_BARS, analyzeFile, resolveOptions } from "./index.js";
+import { DEFAULT_BARS, MAX_BARS, analyzeFile, formatJson, resolveOptions } from "./index.js";
+
+export { formatJson };
 
 const USAGE = `waveform-peaks: turn songs into compact waveform data (normalised peak and RMS bars)
 
@@ -19,11 +21,6 @@ WAV is decoded by the built-in decoder. MP3, M4A, FLAC and the like are decoded 
 an already installed ffmpeg (or afconvert on macOS); nothing is ever downloaded.
 One input file gives a JSON object, several give a JSON array.
 `;
-
-/** JSON with indentation, but every array of plain numbers on a single line. */
-export function formatJson(value) {
-  return JSON.stringify(value, null, 2).replace(/\[\s*(-?[\d.eE+-]+(?:,\s*-?[\d.eE+-]+)*)\s*\]/g, (_m, inner) => `[${inner.replace(/\s*\n\s*/g, " ")}]`);
-}
 
 /**
  * @param {string[]} argv

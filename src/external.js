@@ -12,7 +12,10 @@
 //   * ffmpeg also gets "-format_whitelist" with plain audio demuxers only. That is the real defence against
 //     playlist-style inputs (HLS/M3U8, ffconcat, DASH, SDP ...) that make a decoder open other URLs or local
 //     files: ffmpeg's content probe is not allowed to pick them, whatever the file is called or starts with;
-//   * on top of that, a signature check refuses files that look like such playlists before any decoder starts.
+//   * on top of that, a signature check refuses files that look like such playlists before an external decoder
+//     starts (files the built-in WAV decoder reads never reach one, so they are not scanned);
+//   * the temporary WAV lives in a private folder that is removed when decoding ends, fails, or the process is
+//     interrupted with SIGINT / SIGTERM.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,7 +27,7 @@ export class NoDecoderError extends Error {
       `Cannot decode "${path.basename(file)}": the command line tool reads WAV natively, and for other formats ` +
         `it uses a decoder that is already installed (ffmpeg on PATH, or afconvert on macOS). None was found, ` +
         `and nothing is ever downloaded. Either convert the file to WAV, or open the browser page ` +
-        `(docs/index.html in this repository, also published on GitHub Pages), which decodes MP3/M4A/FLAC locally in your browser.`,
+        `(docs/index.html in the source repository; run "node scripts/serve-docs.mjs" there to serve it), which decodes MP3/M4A/FLAC locally in your browser.`,
     );
     this.name = "NoDecoderError";
   }
@@ -96,12 +99,17 @@ const PLAYLIST_WINDOW = 64 * 1024;
 // Text that only playlist-style inputs contain. Matched anywhere in the window, case-insensitively, with any
 // bytes (including non-ASCII ones) around it. "<?xml" and SDP are matched at the start of the content only:
 // real audio files (BWF/iXML in a WAV, XMP in a FLAC or MP4) legitimately carry XML further in.
-const PLAYLIST_SIGNATURES = ["#extm3u", "#ext-x-", "#extinf", "ffconcat", "[playlist]", "<mpd", "<asx"];
+const PLAYLIST_SIGNATURES = ["#extm3u", "#ext-x-", "#extinf", "ffconcat", "[playlist]"];
+// The XML roots of DASH (<MPD ...>) and ASX (<asx ...>) are only four characters, which random compressed audio
+// contains now and then. A real tag name ends with whitespace, ">" or "/", so require that as well.
+const XML_PLAYLIST_ROOT = /<(?:mpd|asx)[ \t\r\n>/]/;
 
 /** @param {Buffer} window the first bytes of the audio data, after any ID3v2 tag @returns {string|null} what matched */
 export function looksLikePlaylist(window) {
   const text = window.toString("latin1").toLowerCase();
   for (const sig of PLAYLIST_SIGNATURES) if (text.includes(sig)) return sig;
+  const root = text.match(XML_PLAYLIST_ROOT);
+  if (root) return root[0].slice(0, 4);
   const start = text.replace(/^\u00ef\u00bb\u00bf/, "").replace(/^\s+/, "");
   if (start.startsWith("<?xml")) return "<?xml";
   if (/^v=0\r?\n/.test(start)) return "v=0 (SDP)";
@@ -116,13 +124,19 @@ function id3v2Length(head) {
   return 10 + size + (head[5] & 0x10 ? 10 : 0);
 }
 
+/** Refuse directories and other non-regular files (a FIFO or device could block the open that follows). ENOENT surfaces as-is. */
+export async function assertRegularFile(file) {
+  const st = await fs.promises.stat(file);
+  if (!st.isFile()) throw new UnsafeInputError(file, "it is not a regular file.");
+}
+
 /**
- * Refuse directories and other non-regular files, and files that look like playlists. ffmpeg skips ID3v2 tags
- * while probing, so a playlist can hide behind one: skip them here too (also several in a row).
+ * assertRegularFile, plus: refuse files that look like playlists. This is the check that runs before an external
+ * decoder starts. ffmpeg skips ID3v2 tags while probing, so a playlist can hide behind one: skip them here too
+ * (also several in a row).
  */
 export async function assertSafeInput(file) {
-  const st = await fs.promises.stat(file); // ENOENT surfaces as-is
-  if (!st.isFile()) throw new UnsafeInputError(file, "it is not a regular file.");
+  await assertRegularFile(file);
   const fh = await fs.promises.open(file, "r");
   try {
     let pos = 0;
@@ -144,8 +158,45 @@ export async function assertSafeInput(file) {
   }
 }
 
+// Decodes that are running right now: { dir, child }. While there are any, SIGINT and SIGTERM must not leave the
+// (possibly huge) decoded WAV behind, because a `finally` block does not run when a signal ends the process.
+const running = new Set();
+const INTERRUPTS = ["SIGINT", "SIGTERM"];
+const interruptHandlers = INTERRUPTS.map((signal) => [signal, () => onInterrupt(signal)]);
+
+function removeDir(dir) {
+  // retries cover the instant between SIGKILL and the decoder really being gone
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+}
+
+function onInterrupt(signal) {
+  for (const job of running) {
+    job.child?.kill("SIGKILL");
+    try {
+      removeDir(job.dir);
+    } catch {
+      // nothing more to do about it
+    }
+  }
+  running.clear();
+  for (const [name, handler] of interruptHandlers) process.removeListener(name, handler);
+  // Installing a handler switched off Node's default "die on Ctrl-C". Put that back, unless the application has handlers of its own.
+  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+}
+
+function track(job) {
+  if (running.size === 0) for (const [name, handler] of interruptHandlers) process.on(name, handler);
+  running.add(job);
+}
+
+function untrack(job) {
+  running.delete(job);
+  if (running.size === 0) for (const [name, handler] of interruptHandlers) process.removeListener(name, handler);
+}
+
 /**
- * Decode `file` to a temporary WAV and call `fn(wavPath)`. The temp folder is always removed.
+ * Decode `file` to a temporary WAV and call `fn(wavPath)`. The temp folder is removed afterwards, also when decoding
+ * fails and when the process is stopped with SIGINT / SIGTERM (not with SIGKILL, which nothing can catch).
  * @template T
  * @param {string} file
  * @param {(wavPath: string) => Promise<T>} fn
@@ -156,17 +207,19 @@ export async function withDecodedWav(file, fn, { decoder = findDecoder() } = {})
   if (!decoder) throw new NoDecoderError(file);
   await assertSafeInput(file);
   const input = path.resolve(file);
-  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "waveform-peaks-"));
+  const job = { dir: await fs.promises.mkdtemp(path.join(os.tmpdir(), "waveform-peaks-")), child: null };
+  track(job);
   try {
-    const out = path.join(dir, "decoded.wav");
+    const out = path.join(job.dir, "decoded.wav");
     await new Promise((resolve, reject) => {
-      execFile(decoder.bin, decoder.args(input, out), { shell: false, timeout: 10 * 60 * 1000, maxBuffer: 1 << 20, windowsHide: true }, (err, _stdout, stderr) => {
+      job.child = execFile(decoder.bin, decoder.args(input, out), { shell: false, timeout: 10 * 60 * 1000, maxBuffer: 1 << 20, windowsHide: true }, (err, _stdout, stderr) => {
         if (err) reject(new DecoderFailedError(decoder.name, file, (stderr || err.message).toString().trim().split("\n").slice(-2).join(" ")));
         else resolve();
       });
     });
     return await fn(out);
   } finally {
-    await fs.promises.rm(dir, { recursive: true, force: true });
+    untrack(job);
+    await fs.promises.rm(job.dir, { recursive: true, force: true });
   }
 }

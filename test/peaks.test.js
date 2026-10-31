@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { prng } from "../scripts/make-fixtures.mjs";
-import { Analyzer, analyze, analyzeFile, decodeWav, downmixToMono, resolveOptions } from "../src/index.js";
+import { Analyzer, analyze, analyzeFile, decodeWav, downmixToMono, formatJson, resolveOptions } from "../src/index.js";
 
 const fixture = (name) => path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", `${name}.wav`);
 const SR = 8000;
@@ -138,4 +139,46 @@ test("options are validated", () => {
   assert.throws(() => analyze(audio, { normalize: "album" }), /normalize/);
   assert.throws(() => analyze({ channels: [new Float32Array(0)], sampleRate: SR }), /no frames/);
   assert.deepEqual(resolveOptions(), { bars: 96, mode: "peak", normalize: "per-file" });
+});
+
+test("NaN, Infinity and absurdly large samples never turn the output into nulls", () => {
+  const steady = (n = 16) => new Float32Array(n).fill(0.5);
+  const withSample = (value, ArrayType = Float32Array) => {
+    const a = ArrayType.from(steady());
+    a[0] = value;
+    return a;
+  };
+  const opts = { bars: 4 };
+  const reference = analyze({ channels: [withSample(0)], sampleRate: SR }, opts);
+  // a non-finite sample counts as silence, exactly like a NaN always did
+  for (const bad of [NaN, Infinity, -Infinity]) assert.deepEqual(analyze({ channels: [withSample(bad)], sampleRate: SR }, opts), reference, String(bad));
+  const stereoPair = analyze({ channels: [withSample(Infinity), withSample(-Infinity)], sampleRate: SR }, opts);
+  assert.deepEqual(stereoPair, analyze({ channels: [withSample(0), withSample(0)], sampleRate: SR }, opts));
+  // finite but huge values (a Float64Array from a library caller) must not overflow when squared
+  const huge = [1e300, -1e300, 3e38, 1e154, Number.MAX_VALUE];
+  for (const big of huge) {
+    for (const normalize of ["per-file", "none"]) {
+      const r = analyze({ channels: [withSample(big, Float64Array)], sampleRate: SR }, { bars: 4, normalize });
+      for (const v of [...r.peaks, ...r.rms]) assert.ok(Number.isFinite(v) && v >= 0 && v <= 1, `${big} ${normalize}: ${v}`);
+      assert.ok(Number.isFinite(r.peakDb) && Number.isFinite(r.rmsDb), `${big}: dB values`);
+      assert.ok(!formatJson(r).includes("null"), `${big}: no null in the JSON`);
+    }
+  }
+});
+
+test("the bars stay numbers from 0 to 1 for an Infinity sample inside a float32 WAV file", async () => {
+  const { makeWav } = await import("../scripts/make-fixtures.mjs");
+  const bytes = makeWav([new Float64Array(64).fill(0.5)], { kind: "float", bits: 32 });
+  bytes.writeFloatLE(Infinity, bytes.indexOf("data", 12, "latin1") + 8); // makeWav clamps, so patch the first sample afterwards
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wp-test-"));
+  try {
+    const file = path.join(dir, "inf.wav");
+    fs.writeFileSync(file, bytes);
+    const r = await analyzeFile(file, { bars: 4 });
+    assert.deepEqual(r.peaks, [1, 1, 1, 1]);
+    assert.equal(r.peakDb, -6);
+    assert.ok(!formatJson(r).includes("null"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

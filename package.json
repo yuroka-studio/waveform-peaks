@@ -15,7 +15,7 @@
     "./peaks": "./docs/peaks.js"
   },
   "files": ["bin", "src", "docs/peaks.js", "LICENSE", "README.md"],
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=18.3" },
   "scripts": {
     "test": "node --test test/*.test.js",
     "fixtures": "node scripts/make-fixtures.mjs",

@@ -1,6 +1,6 @@
 // Browser page for waveform-peaks. Decodes with the Web Audio API, then runs the
 // very same algorithm as the CLI (peaks.js). Nothing is uploaded: there is no network code here.
-import { analyze, resolveOptions } from "./peaks.js";
+import { analyze, formatJson, resolveOptions } from "./peaks.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -121,7 +121,6 @@ export function buildSvg(result) {
 
 const fmtDb = (v) => (v === null ? "silence" : `${v} dBFS`);
 const fmtTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-const json = (value) => JSON.stringify(value, null, 2).replace(/\[\s*(-?[\d.]+(?:,\s*-?[\d.]+)*)\s*\]/g, (_m, a) => `[${a.replace(/\s*\n\s*/g, " ")}]`);
 
 function renderItem(item) {
   const card = item.card ?? document.createElement("li");
@@ -147,8 +146,8 @@ function renderItem(item) {
     const actions = document.createElement("div");
     actions.className = "actions";
     actions.append(
-      button("Copy JSON", () => copy(json(r), `Copied JSON for ${item.name}.`)),
-      button("Download JSON", () => download(`${item.name.replace(/\.[^.]+$/, "")}.waveform.json`, json(r))),
+      button("Copy JSON", () => copy(formatJson(r), `Copied JSON for ${item.name}.`)),
+      button("Download JSON", () => download(`${item.name.replace(/\.[^.]+$/, "")}.waveform.json`, formatJson(r))),
     );
     const details = document.createElement("details");
     const summary = document.createElement("summary");
@@ -156,7 +155,7 @@ function renderItem(item) {
     const pre = document.createElement("pre");
     pre.tabIndex = 0;
     pre.setAttribute("aria-label", `JSON for ${item.name}`);
-    pre.textContent = json(r);
+    pre.textContent = formatJson(r);
     details.append(summary, pre);
     card.append(meta, buildSvg(r), legend, actions, details);
   }
@@ -253,8 +252,8 @@ function reanalyse() {
 els.form.addEventListener("input", reanalyse);
 els.form.addEventListener("submit", (e) => e.preventDefault());
 
-els.copyAll.addEventListener("click", () => copy(json(allResults()), `Copied JSON for ${allResults().length} file(s).`));
-els.downloadAll.addEventListener("click", () => download("waveforms.json", json(allResults())));
+els.copyAll.addEventListener("click", () => copy(formatJson(allResults()), `Copied JSON for ${allResults().length} file(s).`));
+els.downloadAll.addEventListener("click", () => download("waveforms.json", formatJson(allResults())));
 els.clear.addEventListener("click", () => {
   items = [];
   els.list.replaceChildren();

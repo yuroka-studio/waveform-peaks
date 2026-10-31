@@ -1,11 +1,11 @@
 // Public API: analyse audio files, or reuse the pieces.
 import path from "node:path";
-import { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, resolveOptions } from "../docs/peaks.js";
-import { DecoderFailedError, NoDecoderError, UnsafeInputError, FFMPEG_FORMAT_WHITELIST, assertSafeInput, findDecoder, looksLikePlaylist, withDecodedWav } from "./external.js";
+import { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, formatJson, resolveOptions } from "../docs/peaks.js";
+import { DecoderFailedError, NoDecoderError, UnsafeInputError, FFMPEG_FORMAT_WHITELIST, assertRegularFile, assertSafeInput, findDecoder, looksLikePlaylist, withDecodedWav } from "./external.js";
 import { WavError, bufferSource, decodeWav, fileSource, readChunks, readHeader } from "./wav.js";
 
-export { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, resolveOptions };
-export { DecoderFailedError, NoDecoderError, UnsafeInputError, FFMPEG_FORMAT_WHITELIST, WavError, assertSafeInput, looksLikePlaylist, bufferSource, decodeWav, fileSource, findDecoder, readChunks, readHeader, withDecodedWav };
+export { Analyzer, DEFAULT_BARS, MAX_BARS, analyze, downmixToMono, formatJson, resolveOptions };
+export { DecoderFailedError, NoDecoderError, UnsafeInputError, FFMPEG_FORMAT_WHITELIST, WavError, assertRegularFile, assertSafeInput, looksLikePlaylist, bufferSource, decodeWav, fileSource, findDecoder, readChunks, readHeader, withDecodedWav };
 
 async function analyzeWavPath(wavPath, options) {
   const source = await fileSource(wavPath);
@@ -31,7 +31,7 @@ async function analyzeWavPath(wavPath, options) {
 export async function analyzeFile(file, options = {}) {
   const opts = resolveOptions(options);
   const named = (result) => ({ file: path.basename(file), ...result });
-  await assertSafeInput(file); // regular, binary file only (also keeps a FIFO or device from blocking the open below)
+  await assertRegularFile(file); // keeps a FIFO or device from blocking the open below. The playlist check is not needed here: it guards the external decoders, in withDecodedWav
   try {
     return named(await analyzeWavPath(file, opts));
   } catch (err) {

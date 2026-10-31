@@ -2,7 +2,7 @@
 
 Turn a song into compact waveform data for web players: **N normalised bars, peak and RMS**, as a tiny JSON file.
 
-- **Command line** tool and **JavaScript library**, with **zero dependencies** (Node 18 or newer, ESM).
+- **Command line** tool and **JavaScript library**, with **zero dependencies** (Node 18.3 or newer, ESM).
 - Reads **WAV** by itself: PCM 8/16/24/32-bit, float 32/64-bit, mono, stereo or multichannel, including `WAVE_FORMAT_EXTENSIBLE`.
 - **MP3, M4A, FLAC** and friends: the command line uses a decoder you already have (`ffmpeg`, or `afconvert` on macOS). It never downloads anything. Otherwise use the **browser page**.
 - A **browser page** ([`docs/index.html`](docs/index.html), made for GitHub Pages) that does the same in your browser with the Web Audio API. Files never leave your machine.
@@ -130,7 +130,11 @@ Use it with an `<audio>` element: draw once, redraw while it plays, click to see
   const audio = document.getElementById("song");
   const draw = () => (box.innerHTML = barsSvg(rms, { progress: audio.currentTime / (audio.duration || 1) }));
   audio.addEventListener("timeupdate", draw);
-  box.addEventListener("click", (e) => (audio.currentTime = (e.offsetX / box.clientWidth) * audio.duration));
+  box.addEventListener("click", (e) => {
+    if (!Number.isFinite(audio.duration)) return; // metadata has not loaded yet
+    const x = e.clientX - box.getBoundingClientRect().left; // measured from the box, whichever bar was clicked
+    audio.currentTime = (x / box.clientWidth) * audio.duration;
+  });
   draw();
 </script>
 ```
@@ -149,7 +153,7 @@ const result = await analyzeFile("song.wav", { bars: 96, mode: "rms", normalize:
 const same = analyze({ channels: [left, right], sampleRate: 44100 }, { bars: 96 });
 ```
 
-`waveform-peaks/peaks` exports only the algorithm (`analyze`, the streaming `Analyzer`, `downmixToMono`) and runs in a browser as well. Other exports: `decodeWav`, `readHeader`, `readChunks`, `findDecoder`, `withDecodedWav`.
+`waveform-peaks/peaks` exports only the algorithm (`analyze`, the streaming `Analyzer`, `downmixToMono`, and `formatJson`, which prints the result with each bar array on one line) and runs in a browser as well. Other exports: `decodeWav`, `readHeader`, `readChunks`, `findDecoder`, `withDecodedWav`.
 
 WAV files are read in blocks, so long files do not have to fit in memory.
 
@@ -161,8 +165,8 @@ Audio files can come from anywhere, so the command line treats them as untrusted
 - **No option injection.** The input is resolved to an absolute path first, so a file called `-something.mp3` cannot be read as a flag.
 - **ffmpeg is limited to local files.** It runs with `-protocol_whitelist file` and the input is passed as `file:<absolute path>`, so it can neither treat the name as a URL nor open `http`, `tcp`, `pipe`, `concat:` or any other protocol.
 - **ffmpeg is limited to plain audio demuxers.** It also runs with `-format_whitelist mp3,mov,mp4,m4a,3gp,3g2,mj2,flac,ogg,wav,aiff,aac,matroska,webm,caf`. Both whitelists are input options, so they come before `-i`. Playlist-style demuxers (HLS/M3U8, `concat`, DASH, SDP and the like) are not on the list, so ffmpeg's content probe cannot choose them, whatever the file is called or starts with. A crafted `song.mp3` that is really a playlist is therefore rejected by ffmpeg itself. (Formats outside the list, such as WMA/ASF, need the browser page or a conversion to WAV first.)
-- **A signature check refuses playlists earlier still.** Before any decoder starts, the first 64 KiB after any ID3v2 tag (several in a row are skipped, as ffmpeg does) is searched for `#EXTM3U`, `#EXT-X-`, `#EXTINF`, `ffconcat`, `[playlist]`, `<MPD` and `<asx`, with any bytes, including non-ASCII ones, around them, and checked for a leading `<?xml` or SDP header. A match is refused with a clear message, and the decoder is never run. XML found further inside a file (iXML in a broadcast WAV, XMP in a FLAC) is normal and is not a match. This check is an extra layer, not the defence: the whitelist above is. Directories and other non-regular files are refused too.
-- **Temporary files** go into a private folder created with `mkdtemp`, and are removed even when decoding fails. A decoder run is killed after 10 minutes.
+- **A signature check refuses playlists earlier still.** Before ffmpeg or afconvert is started, the first 64 KiB after any ID3v2 tag (several in a row are skipped, as ffmpeg does) is searched for `#EXTM3U`, `#EXT-X-`, `#EXTINF`, `ffconcat`, `[playlist]`, `<MPD` and `<asx` (the last two only as a real tag, followed by a space, `>` or `/`, so that compressed audio is not refused by chance), with any bytes, including non-ASCII ones, around them, and checked for a leading `<?xml` or SDP header. A match is refused with a clear message, and the decoder is never run. XML found further inside a file (iXML in a broadcast WAV, XMP in a FLAC) is normal and is not a match. Files that the built-in WAV decoder reads are not scanned at all, because no other program ever sees them. This check is an extra layer, not the defence: the whitelist above is. Directories and other non-regular files are refused too.
+- **Temporary files** go into a private folder created with `mkdtemp`, and are removed even when decoding fails, and when you stop the tool with Ctrl-C or `kill` (SIGINT / SIGTERM: the decoder is stopped and the folder deleted before the tool exits). Only SIGKILL or a power cut can leave one behind. A decoder run is killed after 10 minutes. The size of the decoded temporary WAV is not capped, so a hostile file that expands enormously can use a lot of disk space until then; if that matters to you, convert untrusted files yourself first.
 
 The built-in WAV decoder reads in blocks of at most about 8 MB and never allocates by a size declared in the header, so a hostile WAV cannot make it exhaust memory. The browser page decodes with the browser's own audio stack inside a strict Content-Security-Policy.
 
@@ -190,7 +194,7 @@ MIT, © Yuroka Studio. See [LICENSE](LICENSE).
 
 **waveform-peaks**, bir şarkıyı web oynatıcıları için küçük bir dalga biçimi verisine çevirir: normalize edilmiş **N çubuk** (tepe ve RMS), tek bir JSON dosyası olarak.
 
-- Komut satırı aracı ve JavaScript kütüphanesi; **hiç bağımlılığı yok** (Node 18+).
+- Komut satırı aracı ve JavaScript kütüphanesi; **hiç bağımlılığı yok** (Node 18.3+).
 - **WAV** dosyalarını kendisi okur (8/16/24/32 bit tamsayı, 32/64 bit kayan nokta, mono/stereo/çok kanallı). MP3, M4A ve FLAC için bilgisayarınızda zaten kurulu olan `ffmpeg` ya da macOS'taki `afconvert` kullanılır; **hiçbir şey indirilmez**. Bunlar yoksa tarayıcı sayfasını kullanın.
 - `docs/index.html`: ses dosyalarını **tarayıcınızda** (Web Audio API) çözüp aynı algoritmayla çubukları hesaplar. **Hiçbir dosya yüklenmez**, ağ isteği yapılmaz.
 - Ücretli hizmet, hesap, ölçüm veya telemetri yoktur.
